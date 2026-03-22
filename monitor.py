@@ -18,7 +18,7 @@ def now_beijing():
 # ========== 配置区 ==========
 URL_TO_MONITOR = "https://alpha123.uk/zh/"
 AIRDROP_SECTION = "今日空投"
-EMPTY_INDICATORS = ["暂无数据", "无数据", "-", "——", "空", "加载中", "暂无"]
+EMPTY_INDICATORS = ["暂无数据", "无数据", "-", "——", "空", "加载中", "暂无", "待公布", "N/A", "null", "undefined"]
 PREVIEW_LENGTH = 800
 
 # ========== COS 配置 ==========
@@ -111,7 +111,6 @@ def fetch_with_playwright(url, timeout=60):
     """
     try:
         with sync_playwright() as p:
-            # 启动浏览器
             browser = p.chromium.launch(headless=True)
             
             context = browser.new_context(
@@ -135,7 +134,6 @@ def fetch_with_playwright(url, timeout=60):
             
             page.on("response", handle_response)
             
-            # 访问页面
             print(f"Navigating to {url}...")
             page.goto(url, wait_until='networkidle', timeout=timeout*1000)
             
@@ -148,11 +146,12 @@ def fetch_with_playwright(url, timeout=60):
                 browser.close()
                 return api_data
             
-            # 否则从页面提取表格数据
+            # 否则从页面提取表格数据 - 修复后的提取逻辑
             print("Extracting from DOM...")
             table_data = page.evaluate('''() => {
                 const rows = document.querySelectorAll('table tr');
                 const data = [];
+                
                 for (let i = 1; i < rows.length; i++) {
                     const cells = rows[i].querySelectorAll('td');
                     if (cells.length >= 2) {
@@ -160,9 +159,24 @@ def fetch_with_playwright(url, timeout=60):
                         const points = cells[1]?.innerText?.trim() || '';
                         const amount = cells[2]?.innerText?.trim() || '';
                         const time = cells[3]?.innerText?.trim() || '';
-                        if (name && name !== '项目' && name !== '暂无数据') {
-                            data.push({name, points, amount, time});
-                        }
+                        
+                        // 严格过滤条件
+                        if (!name) continue;
+                        if (name === '项目') continue;  // 表头
+                        
+                        // 检查是否为"暂无数据"或空数据行
+                        const isEmptyIndicator = ['暂无数据', '无数据', '-', '——', '空', '加载中', '暂无', '待公布'].some(
+                            indicator => name.includes(indicator) || name === indicator
+                        );
+                        if (isEmptyIndicator) continue;
+                        
+                        // 检查是否所有字段都是空或占位符（排除真正的项目）
+                        const allFieldsEmpty = [name, points, amount, time].every(v => 
+                            !v || v === '' || v === '-' || v === '——' || v === '待公布' || v.toLowerCase() === 'null'
+                        );
+                        if (allFieldsEmpty) continue;
+                        
+                        data.push({name, points, amount, time});
                     }
                 }
                 return data;
@@ -177,9 +191,42 @@ def fetch_with_playwright(url, timeout=60):
         print(traceback.format_exc())
         return None
 
+def is_valid_project(project):
+    """
+    检查项目数据是否有效（不是空/占位符）
+    """
+    if not isinstance(project, dict):
+        return False
+    
+    # 获取项目名称
+    name = (project.get('name') or 
+           project.get('project') or 
+           project.get('symbol') or 
+           project.get('title') or '').strip()
+    
+    # 名称必须存在且不是占位符
+    if not name:
+        return False
+    
+    # 检查是否包含空数据指示词
+    name_lower = name.lower()
+    for indicator in EMPTY_INDICATORS:
+        if indicator.lower() in name_lower and len(name) <= len(indicator) + 5:
+            return False
+    
+    # 检查是否所有值都是空的或占位符
+    values = []
+    for v in project.values():
+        if v is not None:
+            val_str = str(v).strip()
+            if val_str and val_str not in ['', '-', '——', 'None', 'null', 'undefined', '待公布']:
+                values.append(val_str)
+    
+    return len(values) > 0
+
 def parse_projects(data):
     """
-    解析项目数据
+    解析项目数据，严格过滤无效数据
     """
     if not data:
         return [], False
@@ -200,19 +247,20 @@ def parse_projects(data):
                     projects = value
                     break
     
-    # 过滤空数据
-    has_data = len(projects) > 0
+    # 严格过滤无效项目
+    valid_projects = [p for p in projects if is_valid_project(p)]
     
-    if has_data and len(projects) == 1:
-        project = projects[0]
-        if isinstance(project, dict):
-            values_str = ' '.join(str(v).lower() for v in project.values())
-            for indicator in EMPTY_INDICATORS:
-                if indicator.lower() in values_str:
-                    has_data = False
-                    break
+    has_data = len(valid_projects) > 0
     
-    return projects, has_data
+    # 额外检查：如果只有一个项目且看起来像占位符，视为无数据
+    if has_data and len(valid_projects) == 1:
+        p = valid_projects[0]
+        name = str(p.get('name') or '').strip().lower()
+        if any(indicator in name for indicator in ['unknown', '暂无', '无数据', 'empty']):
+            has_data = False
+            valid_projects = []
+    
+    return valid_projects, has_data
 
 def format_projects(projects, max_length=800):
     """格式化项目列表"""
@@ -225,8 +273,11 @@ def format_projects(projects, max_length=800):
             name = (project.get('name') or 
                    project.get('project') or 
                    project.get('symbol') or 
-                   project.get('title') or 
-                   'Unknown')
+                   project.get('title') or '')
+            
+            # 跳过无效名称
+            if not name or name == 'Unknown':
+                continue
             
             points = (project.get('points') or 
                      project.get('积分') or 
@@ -245,8 +296,9 @@ def format_projects(projects, max_length=800):
                    '-')
             
             lines.append(f"{i}. {name} | 积分: {points} | 数量: {amount} | 时间: {time}")
-        else:
-            lines.append(f"{i}. {str(project)}")
+    
+    if not lines:
+        return "暂无数据"
     
     if len(projects) > 5:
         lines.append(f"... 还有 {len(projects) - 5} 个项目")
@@ -293,6 +345,7 @@ def main():
     last_data = cos_get() or {}
     last_has_data = last_data.get('has_data', False)
     last_projects_hash = last_data.get('projects_hash', '')
+    last_projects_preview = last_data.get('projects_preview', '')
     
     print(f"Last state: has_data={last_has_data}, hash={last_projects_hash[:8] if last_projects_hash else 'None'}")
     
@@ -314,7 +367,7 @@ def main():
     print(f"Current: has_data={has_data}, projects={len(projects)}, hash={projects_hash[:8]}")
     print(f"Preview: {projects_preview[:200]}...")
     
-    # 检测逻辑
+    # 检测逻辑 - 优化版本
     alert_triggered = False
     alert_title = ""
     alert_message = ""
@@ -334,38 +387,57 @@ def main():
         alert_detail = projects_preview
     
     else:
+        # 检查是否有实质变化
         data_changed = projects_hash != last_projects_hash
+        content_changed = projects_preview != last_projects_preview
         
-        # 核心：从空到有数据
+        # 状态转换：从空到有数据（最重要的通知）
         if not last_has_data and has_data:
             alert_triggered = True
             alert_title = "🚨 今日空投更新！"
             alert_message = f"**发现 {len(projects)} 个新的空投项目！**\n\n💡 有新的空投发布了，请尽快查看！"
             alert_detail = projects_preview
         
-        # 数据内容变化
-        elif last_has_data and has_data and data_changed:
-            alert_triggered = True
-            alert_title = "📢 今日空投数据变化"
-            alert_message = f"**空投项目数据已更新**\n当前项目数：{len(projects)}"
-            alert_detail = projects_preview
-        
-        # 数据清空
+        # 状态转换：从有到空（空投结束）
         elif last_has_data and not has_data:
             alert_triggered = True
             alert_title = "⚠️ 今日空投已结束"
             alert_message = "**所有今日空投项目已下架或结束**"
             alert_detail = "当前暂无进行中的空投项目"
+        
+        # 都有数据且内容真正变化（项目增减或信息变更）
+        elif last_has_data and has_data and data_changed and content_changed:
+            # 检查是否只是时间更新而项目没变（避免频繁通知）
+            old_count = last_data.get('projects_count', 0)
+            new_count = len(projects)
+            
+            if old_count != new_count:
+                alert_triggered = True
+                alert_title = "📢 今日空投项目数量变化"
+                alert_message = f"**空投项目数量已更新**\n之前：{old_count} 个\n当前：{new_count} 个"
+                alert_detail = projects_preview
+            else:
+                # 项目数量相同但内容变化（可能是积分/时间更新）
+                # 可选：降低频率通知，或只在特定字段变化时通知
+                alert_triggered = True
+                alert_title = "📢 今日空投数据更新"
+                alert_message = f"**空投项目信息已更新**\n当前项目数：{len(projects)}"
+                alert_detail = projects_preview
+        
+        # 无实质变化，不发送通知
+        else:
+            print(f"No significant change detected. data_changed={data_changed}, content_changed={content_changed}")
     
     # 保存状态
     print("Saving cache to COS...")
-    cos_put(cache_data := {
+    cache_data = {
         'has_data': has_data,
         'projects_hash': projects_hash,
         'projects_count': len(projects),
         'projects_preview': projects_preview[:1000],
         'timestamp': now_beijing().isoformat()
-    })
+    }
+    cos_put(cache_data)
     
     # 发送通知
     if alert_triggered:

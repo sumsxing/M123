@@ -16,6 +16,11 @@ jobs:
           apt-get update && apt-get install -y git
           git clone --depth 1 https://github.com/${{ github.repository }}.git .
       
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium
+      
       - name: Run monitor
         env:
           WECHAT_KEY: ${{ secrets.WECHAT_KEY }}

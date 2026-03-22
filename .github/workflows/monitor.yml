@@ -4,7 +4,10 @@ on:
   schedule:
     - cron: '*/30 * * * *'  # 每30分钟运行一次
   workflow_dispatch:  # 允许手动触发
-
+  
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # 强制使用 Node.js 24
+  
 jobs:
   monitor:
     runs-on: ubuntu-latest
